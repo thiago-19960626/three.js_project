@@ -1,0 +1,409 @@
+<html>
+<head>
+    <title>Panorama</title>
+    <meta name="viewport" content="width=device-width, user-scalable=no, minimum-scale=1.0, maximum-scale=1.0">
+    <style>
+        body{
+            margin: 0px;
+            overflow: hidden;
+			background:black;
+        }
+    </style>
+	<script src="libs/r73/three.min.js"></script>
+	<script src="js/math.js"></script>
+</head>
+<body>
+<div id="container"></div>
+<script>
+
+    /**************** Setting Section ***********************/
+	
+    var maskParams = {
+        borderWidth: 5,
+        cornerBlurWidth: 10
+    }
+
+    var imageOrder = [ 5 , 2 ,4 , 3 , 1, 0 ];
+
+    var sphereDetail = 200;
+
+    var imgSourcePath = "Camera-20150730-095355";
+    var ptoFileName = "000000229.pto";
+	
+	var yaw = 0;
+	var roll = 0;
+	var pitch = 0;
+	var opacity = 1.0;
+	
+    /***********************************************************/
+
+	
+    var pano = new THREE.Object3D(),
+     imagePlanes = [];            
+
+    var srcSize = {}, destSize = {}, mpdistance;
+
+    var camera, scene, renderer, controls;
+
+	init();
+    animate();	    
+	
+    function generateAlphaMap( data, photoId ) {
+
+        var canvas, context, image;
+        var rMain = maskParams.borderWidth;    // sides
+        var rMasks = maskParams.cornerBlurWidth;  // corners
+        var bSize = rMain + 1;
+        var bSizeMask = rMasks;
+
+        canvas = document.createElement( 'canvas' );
+        canvas.width = 256*2;
+        canvas.height =256*2;
+
+        context = canvas.getContext( '2d' );
+
+        var fillWhite = function () {
+            context.fillStyle = "#FFFFFF";
+            context.fillRect( 0, 0, canvas.width, canvas.height );
+        }
+
+        var subtractBorders = function () {
+            fillWhite();
+
+            context.fillStyle = "#000000";
+            context.fillRect( 0, 0, bSize, canvas.height );
+            context.fillRect( canvas.width - bSize, 0, bSize, canvas.height );
+            context.fillRect( 0, 0, canvas.width, bSize );
+            context.fillRect( 0, canvas.height - bSize, canvas.width, bSize );
+
+            image = context.getImageData( 0, 0, canvas.width, canvas.height );
+			
+            return image;
+        }
+
+        var subtractMasks = function () {
+            if ( data.masks ) {
+                fillWhite();
+
+                for ( var i = 0; i < data.masks.length; i++ ) {
+                    var path = data.masks[ i ].p.split( /\s/g ).map( function ( v ) {
+                        return parseFloat( v )
+                    } );
+                    context.fillStyle = "#000000";
+                    context.strokeStyle = "#000000";
+                    context.lineWidth = bSizeMask;
+                    context.moveTo(
+                            canvas.width * path[ 0 ] / data.w,
+                            canvas.height * path[ 1 ] / data.h
+                    );
+                    for ( var j = 1; j < path.length / 2; j++ ) {
+                        context.lineTo(
+                                canvas.width * path[ j * 2 ] / data.w,
+                                canvas.height * path[ j * 2 + 1 ] / data.h
+                        );
+                    }
+                    context.fill();
+                    context.stroke();
+                }
+            }
+
+            image = context.getImageData( 0, 0, canvas.width, canvas.height );
+			
+            return image;
+        }
+
+        fillWhite();
+        var image2 = subtractBorders();
+        var image1 = subtractMasks();
+
+        var p1 = image1.data;
+        var p2 = image2.data;
+
+        for ( var i = 0; i < p1.length; i += 4 ) {
+            p1[ i + 0 ] = Math.min( p1[ i + 0 ], p2[ i + 0 ] );
+            p1[ i + 1 ] = Math.min( p1[ i + 1 ], p2[ i + 1 ] );
+            p1[ i + 2 ] = Math.min( p1[ i + 2 ], p2[ i + 2 ] );
+            p1[ i + 3 ] = Math.min( p1[ i + 3 ], p2[ i + 3 ] );
+        }
+
+        context.putImageData( image1, 0, 0 );
+
+        return canvas;
+    }
+
+
+    function createPhoto( data, photoId ) {
+	
+	  if(photoId == 5 ){
+		  
+		  var geometry = new THREE.PlaneBufferGeometry(
+                data.w,
+                data.h,
+                1500,
+                Math.ceil( 1500 * data.w / data.h )
+        );
+	   }else{
+			var geometry = new THREE.PlaneBufferGeometry(
+                data.w,
+                data.h,
+                sphereDetail,
+                Math.ceil( sphereDetail * data.w / data.h )
+
+			);
+	   }        
+
+        var image_texture;
+
+        var loader = new THREE.TextureLoader();
+
+        loader.load(                
+                imgSourcePath + '/' + data.n,
+                
+                function ( texture ) {
+
+                    image_texture = texture;
+                    image_texture.minFilter = THREE.LinearFilter;
+
+                    var imageObj = processImage( image_texture, data, photoId );
+
+                    imagePlanes.push( imageObj );
+
+                    pano.add( imageObj.mesh );
+
+                }
+        );
+
+        function processImage( image_texture, data, photoId ) {
+
+            var alphaTexture = new THREE.Texture( generateAlphaMap( data, photoId ) );
+            alphaTexture.needsUpdate = true;
+
+            var material = new THREE.MeshBasicMaterial(
+                    {
+                        color: 0xffffff,
+                        map: image_texture,
+                        alphaMap: alphaTexture,
+                        transparent: true,
+                        depthTest: false,
+                        opacity: opacity
+
+                    } );
+
+            var plane = new THREE.Mesh( geometry, material );
+
+            plane.renderOrder = imageOrder[ photoId ];
+
+            var positions = geometry.attributes.position.array.slice(0);
+
+            var a, b;
+            
+            var mprot = [];
+
+            srcSize.x = data.w;
+            srcSize.y = data.h;
+
+            destSize.x = window.innerWidth/1.65;
+            destSize.y = window.innerWidth/3.3
+
+            var imhfov = data.v;
+
+            var imwidth = srcSize.x;
+            var imheight = srcSize.y;
+
+            var imyaw = data.y + yaw;			
+            var impitch = data.p;
+            var imroll = data.r;
+
+            var pnhfov = 360.0;
+            var pnwidth = destSize.x;
+
+            var ima = data.a;
+            var imb = data.b;
+            var imc = data.c;
+
+            var mprad = [];
+			
+            mprad[ 3 ] = ima;
+            mprad[ 2 ] = imb;
+            mprad[ 1 ] = imc;
+            mprad[ 0 ] = 1.0 - ( ima + imb + imc );
+            mprad[ 4 ] = ( imwidth < imheight ? imwidth : imheight ) / 2.0;
+            mprad[ 5 ] = CalcCorrectionRadius_copy( mprad );
+			
+            b = DEG_TO_RAD( pnhfov );
+
+            var mpmt = SetMatrix( DEG_TO_RAD( impitch ),
+                    0.0,
+                    DEG_TO_RAD( imroll ),
+                    1 );
+
+            mpdistance = pnwidth / b;
+
+            mprot[ 0 ] = mpdistance * Math.PI;						
+            mprot[ 1 ] = imyaw * mpdistance * Math.PI / 180.0;
+
+            var mpscale = [];
+
+            mpscale[ 0 ] = ( pnhfov / imhfov ) * ( imwidth / pnwidth );
+
+            mpscale[ 0 ] = 1.0 / mpscale[ 0 ];
+            mpscale[ 1 ] = mpscale[ 0 ];
+
+            var mphorizontal = -data.d;
+            var mpvertical = data.e;
+
+            for ( var i = 0, il = positions.length; i < il; i+=3 ) {
+
+                var x = positions[ i ];
+                var y = positions[ i + 1 ];
+
+                var newVal = horiz( x, y, mphorizontal );
+
+                newVal = vert( newVal.x, newVal.y, mpvertical );
+
+                newVal = inv_radial( newVal.x, newVal.y, mprad );
+
+                newVal = resize( newVal.x, newVal.y, mpscale );
+
+                newVal = persp_sphere( newVal.x, newVal.y, mpmt, mpdistance );
+
+                newVal = erect_sphere_tp( newVal.x, newVal.y, mpdistance );
+
+                newVal = rotate_erect( newVal.x, newVal.y, mprot );
+
+                positions[ i ] = newVal.x;
+                positions[ i + 1 ] = newVal.y;
+
+            }
+
+            
+            plane.flatVerticesStash = [];
+
+            positions.forEach( function ( coord, index ) {
+                plane.flatVerticesStash[ index ] = coord;
+            } );
+
+            var positions = plane.geometry.attributes.position.array;
+
+            for ( var j = 0, jl = positions.length; j < jl; j+=3 ) {
+					
+				
+                positions[ j ] = plane.flatVerticesStash[ j ];
+                positions[ j + 1 ] = plane.flatVerticesStash[ j + 1 ];
+                positions[ j + 2 ] = plane.flatVerticesStash[ j + 2 ];
+				
+            }
+			
+            plane.geometry.attributes.position.needsUpdate = true;
+            plane.position.set(0,0,0);
+
+            plane.defaultMatrix = plane.matrix.clone();
+
+            return { mesh: plane, data: data, id: photoId };
+        }
+
+    }
+	
+	function parsepto( ptofile ) {
+        var lines = ptofile.split( '\n' ).filter( function ( line ) {
+            var tline = line.trim();
+            return tline.length > 0 && tline[ 0 ] !== '#';
+        });
+        var result = {};
+        for ( var i = 0; i < lines.length; i++ ) {
+            var line = lines[ i ];
+            var type = line[ 0 ];
+            line = line.substr( 1 ).trim();
+            if ( !result[ type ] ) result[ type ] = [];
+            obj = {};
+            while ( line.length > 0 ) {
+                var code = line.match( /[A-Za-z]+/ )[ 0 ];
+                line = line.substr( code.length ).trim();
+                var value;
+                if ( line[ 0 ] === '"' ) {
+                    value = line.substring( 1, line.indexOf( '"', 1 ) );
+                    line = line.substr( value.length + 2 ).trim();
+                } else if ( line[ 0 ] === "'" ) {
+                    value = line.substring( 1, line.indexOf( "'", 1 ) );
+                    line = line.substr( value.length + 2 ).trim();
+                } else {
+                    value = line.match( /[^\s]+/ )[ 0 ];
+                    line = line.substr( value.length ).trim();
+                }
+                if ( value.match( /^\-?[0-9]+(\.[0-9]*)?$/ ) ) {
+                    value = parseFloat( value );
+                }
+                obj[ code ] = value;
+            }
+            result[ type ].push( obj );
+        }
+
+        // parse masks and add links of masks to corresponding image
+        for ( var i = 0; i < result.k.length; i++ ) {
+            var curk = result.k[ i ];
+            if ( !result.i[ curk.i ].masks ) result.i[ curk.i ].masks = [];
+            result.i[ curk.i ].masks.push( curk );
+        }
+        return result;
+    }
+	
+    function init() {
+
+        var container, mesh;
+
+        camera = new THREE.PerspectiveCamera( 60, window.innerWidth / window.innerHeight, 1, 800 );
+        
+        camera.position.z = 500;
+
+        scene = new THREE.Scene();
+
+        var XHRLoader = new THREE.XHRLoader();
+        XHRLoader.load( imgSourcePath + '/' + ptoFileName, function ( data ) {
+
+            var ptoi = parsepto( data ).i;
+
+			
+            for ( var i = 0; i < ptoi.length; i++ ) {
+                createPhoto( ptoi[ i ], i );
+            }
+			
+            scene.add( pano );
+
+        } );
+
+        renderer = new THREE.WebGLRenderer();
+        renderer.setPixelRatio( window.devicePixelRatio );
+        renderer.setSize( window.innerWidth, window.innerHeight );
+
+        container = document.getElementById( 'container' );
+        container.appendChild( renderer.domElement );
+
+        window.addEventListener( 'resize', onWindowResize, false );
+    }
+
+    function onWindowResize() {
+
+        camera.aspect = 2;
+        camera.updateProjectionMatrix();
+
+        renderer.setSize( window.innerWidth, window.innerWidth/2 );
+
+    }
+
+
+    function animate() {
+
+        requestAnimationFrame( animate );
+		
+        update();
+
+    }
+
+    function update() {
+
+        renderer.render( scene, camera );
+
+    }
+</script>
+</body>
+</html>
